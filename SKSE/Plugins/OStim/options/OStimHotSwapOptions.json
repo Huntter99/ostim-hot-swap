@@ -10,7 +10,7 @@
   "options": [
     {
       "name": "SwapActors",
-      "page": "ManageActors",
+      "page": "OStimHotSwap",
       "states": {
         "0": {
           "icon": "OStimHotSwap/OStimHotSwapSwap",
@@ -21,7 +21,7 @@
     },
     {
       "name": "AddActor",
-      "page": "ManageActors",
+      "page": "OStimHotSwap",
       "states": {
         "0": {
           "icon": "OStimHotSwap/OStimHotSwapAdd",
@@ -32,7 +32,7 @@
     },
     {
       "name": "RemoveActor",
-      "page": "ManageActors",
+      "page": "OStimHotSwap",
       "states": {
         "0": {
           "icon": "OStimHotSwap/OStimHotSwapRemove",
