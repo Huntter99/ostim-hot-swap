@@ -1,0 +1,45 @@
+{
+  "pages": [
+    {
+      "name": "OStimHotSwap",
+      "description": "OStim Hot Swap options",
+      "icon": "OStimHotSwap/OStimHotSwap",
+      "parent": null
+    }
+  ],
+  "options": [
+    {
+      "name": "SwapActors",
+      "page": "ManageActors",
+      "states": {
+        "0": {
+          "icon": "OStimHotSwap/OStimHotSwapSwap",
+          "description": "Swap two actors",
+          "function": "TTOHS_Options/SwapActorsWithUI"
+        }
+      }
+    },
+    {
+      "name": "AddActor",
+      "page": "ManageActors",
+      "states": {
+        "0": {
+          "icon": "OStimHotSwap/OStimHotSwapAdd",
+          "description": "Add a new actor",
+          "function": "TTOHS_Options/AddActorWithUI"
+        }
+      }
+    },
+    {
+      "name": "RemoveActor",
+      "page": "ManageActors",
+      "states": {
+        "0": {
+          "icon": "OStimHotSwap/OStimHotSwapRemove",
+          "description": "Remove an existing actor",
+          "function": "TTOHS_Options/RemoveActorWithUI"
+        }
+      }
+    }
+  ]
+}

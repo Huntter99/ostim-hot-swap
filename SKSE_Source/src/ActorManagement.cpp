@@ -41,10 +41,10 @@ namespace HotSwap::ActorManagement {
         }
 
         // Would a compatible scene exist for the new actor set?
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
 
-        uint32_t ids[33];
+        uint32_t ids[kMaxActors + 1];
         for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
         ids[count] = formID;
 
@@ -63,10 +63,10 @@ namespace HotSwap::ActorManagement {
             return -1;
         }
 
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
 
-        uint32_t ids[33];
+        uint32_t ids[kMaxActors + 1];
         for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
         ids[count] = actor->GetFormID();
 
@@ -75,17 +75,52 @@ namespace HotSwap::ActorManagement {
         return result;
     }
 
+    int32_t addActorsToThread(uint32_t threadID, const std::vector<RE::Actor*>& actors, API* api,
+                              void (*onComplete)(int32_t, void*), void* context) {
+        SKSE::log::debug("addActorsToThread: threadID={} actorCount={}", threadID, actors.size());
+        if (actors.empty()) {
+            SKSE::log::warn("addActorsToThread: empty actor list");
+            if (onComplete) onComplete(-1, context);
+            return -1;
+        }
+
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+
+        uint32_t ids[kMaxActors];
+        for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
+        uint32_t newCount = count;
+
+        for (auto* actor : actors) {
+            if (!actor || newCount >= kMaxActors) {
+                SKSE::log::warn("addActorsToThread: null actor or limit reached");
+                if (onComplete) onComplete(-1, context);
+                return -1;
+            }
+            if (!canAddActor(threadID, actor, api)) {
+                SKSE::log::warn("addActorsToThread: validation failed for actor {:X}", actor->GetFormID());
+                if (onComplete) onComplete(-1, context);
+                return -1;
+            }
+            ids[newCount++] = actor->GetFormID();
+        }
+
+        int32_t result = api->MigrateThread(threadID, ids, newCount, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
+        SKSE::log::debug("addActorsToThread: MigrateThread returned {}", result);
+        return result;
+    }
+
     bool canRemoveActor(uint32_t threadID, uint32_t position, API* api) {
         SKSE::log::trace("canRemoveActor: threadID={} position={}", threadID, position);
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
 
         if (position >= count || count <= 1) {
             SKSE::log::debug("canRemoveActor: invalid — position={} count={}", position, count);
             return false;
         }
 
-        uint32_t ids[32];
+        uint32_t ids[kMaxActors];
         uint32_t newCount = 0;
         for (uint32_t i = 0; i < count; i++)
             if (i != position) ids[newCount++] = buf[i].formID;
@@ -104,16 +139,63 @@ namespace HotSwap::ActorManagement {
             return -1;
         }
 
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
 
-        uint32_t ids[32];
+        uint32_t ids[kMaxActors];
         uint32_t newCount = 0;
         for (uint32_t i = 0; i < count; i++)
             if (i != position) ids[newCount++] = buf[i].formID;
 
         int32_t result = api->MigrateThread(threadID, ids, newCount, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
         SKSE::log::debug("removeActorFromThread: MigrateThread returned {}", result);
+        return result;
+    }
+
+    int32_t removeActorsFromThread(uint32_t threadID, const std::vector<uint32_t>& positions, API* api,
+                                   void (*onComplete)(int32_t, void*), void* context) {
+        SKSE::log::debug("removeActorsFromThread: threadID={} positionCount={}", threadID, positions.size());
+        if (positions.empty()) {
+            SKSE::log::warn("removeActorsFromThread: empty position list");
+            if (onComplete) onComplete(-1, context);
+            return -1;
+        }
+
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+
+        // Validate all positions first
+        for (uint32_t pos : positions) {
+            if (pos >= count) {
+                SKSE::log::warn("removeActorsFromThread: position {} out of range (count={})", pos, count);
+                if (onComplete) onComplete(-1, context);
+                return -1;
+            }
+        }
+
+        // Build removal set and check result would leave at least 1 actor
+        std::vector<bool> remove(count, false);
+        for (uint32_t pos : positions) remove[pos] = true;
+        uint32_t remaining = count - static_cast<uint32_t>(positions.size());
+        if (remaining < 1) {
+            SKSE::log::warn("removeActorsFromThread: would remove all actors");
+            if (onComplete) onComplete(-1, context);
+            return -1;
+        }
+
+        uint32_t ids[kMaxActors];
+        uint32_t newCount = 0;
+        for (uint32_t i = 0; i < count; i++)
+            if (!remove[i]) ids[newCount++] = buf[i].formID;
+
+        if (!api->HasCompatibleNode(threadID, ids, newCount)) {
+            SKSE::log::warn("removeActorsFromThread: no compatible node for resulting actor set");
+            if (onComplete) onComplete(-1, context);
+            return -1;
+        }
+
+        int32_t result = api->MigrateThread(threadID, ids, newCount, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
+        SKSE::log::debug("removeActorsFromThread: MigrateThread returned {}", result);
         return result;
     }
 
@@ -124,8 +206,8 @@ namespace HotSwap::ActorManagement {
             return false;
         }
 
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
         if (posA >= count || posB >= count) {
             SKSE::log::warn("canSwapActors: position out of range — posA={} posB={} count={}", posA, posB, count);
             return false;
@@ -144,7 +226,7 @@ namespace HotSwap::ActorManagement {
             return false;
         }
 
-        uint32_t ids[32];
+        uint32_t ids[kMaxActors];
         for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
         std::swap(ids[posA], ids[posB]);
 
@@ -162,8 +244,8 @@ namespace HotSwap::ActorManagement {
             return {};
         }
 
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
 
         std::vector<uint32_t> partners;
         for (uint32_t i = 0; i < count; i++) {
@@ -183,10 +265,10 @@ namespace HotSwap::ActorManagement {
             return -1;
         }
 
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
+        OstimNG_API::Thread::ActorData buf[kMaxActors];
+        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
 
-        uint32_t ids[32];
+        uint32_t ids[kMaxActors];
         for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
         std::swap(ids[posA], ids[posB]);
 

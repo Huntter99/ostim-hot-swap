@@ -16,8 +16,14 @@ bool Function CanSwapActors(int threadID, int posA, int posB) native global
 ; Adds the actor to the thread. Returns the new thread ID on success, or -1 on failure.
 int Function AddActorToThread(int threadID, Actor actor) native global
 
+; Adds multiple actors to the thread. Returns the new thread ID on success, or -1 on failure.
+int Function AddActorsToThread(int threadID, Actor[] actors) native global
+
 ; Removes the actor at the given position from the thread. Returns the new thread ID on success, or -1 on failure.
 int Function RemoveActorFromThread(int threadID, int position) native global
+
+; Removes the actors at the given positions from the thread. Returns the new thread ID on success, or -1 on failure.
+int Function RemoveActorsFromThread(int threadID, int[] positions) native global
 
 ; Swaps the actors at posA and posB in the thread. Returns the new thread ID on success, or -1 on failure.
 int Function SwapActors(int threadID, int posA, int posB) native global
