@@ -9,7 +9,7 @@ namespace HotSwap::Utils {
             explicit MessageBoxCallback(std::function<void(uint32_t)> callback) : _callback{std::move(callback)} {}
             ~MessageBoxCallback() override = default;
 
-            void Run(RE::IMessageBoxCallback::Message message) override {
+            void Run(std::uint8_t message) override {
                 _callback(static_cast<uint32_t>(message));
             }
 
@@ -44,7 +44,7 @@ namespace HotSwap::Utils {
         RE::TESDataHandler* handler = RE::TESDataHandler::GetSingleton();
         if (handler && handler->GetLoadedModIndex("UIExtensions.esp")) {
             const auto skyrimVM = RE::SkyrimVM::GetSingleton();
-            auto vm = skyrimVM ? skyrimVM->impl : nullptr;
+            auto vm = skyrimVM ? skyrimVM->GetVMRuntimeData().impl : nullptr;
             if (vm) {
                 RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> functor(
                     new UIExtCallbackFunctor(std::move(callback)));

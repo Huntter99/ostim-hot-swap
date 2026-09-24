@@ -44,7 +44,6 @@ namespace {
         logger->set_pattern("[%H:%M:%S] [%l] %v");
 
         spdlog::set_default_logger(std::move(logger));
-        spdlog::info("Logging to {}", logPath.string());
     }
 
     void PrintToConsole(std::string_view message) {
@@ -111,7 +110,7 @@ namespace {
 
                 // Get thread ID via OActor.GetThreadID papyrus native
                 const auto skyrimVM = RE::SkyrimVM::GetSingleton();
-                auto vm = skyrimVM ? skyrimVM->impl : nullptr;
+                auto vm = skyrimVM ? skyrimVM->GetVMRuntimeData().impl : nullptr;
                 if (!vm) continue;
 
                 RE::Actor* capturedActor = targetActor;
