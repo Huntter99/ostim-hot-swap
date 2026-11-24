@@ -1,399 +1,243 @@
-#include "ActorManagement.h"
-#include "Settings.h"
-#include "Utils/MessageBox.h"
-#include <SKSE/SKSE.h>
+#pragma once
 
-namespace {
-    void SendNotification(const char* text) {
-        auto* queue = RE::UIMessageQueue::GetSingleton();
-        if (!queue) return;
-        auto* data = static_cast<RE::HUDData*>(
-            queue->CreateUIMessageData(RE::InterfaceStrings::GetSingleton()->hudData));
-        if (!data) return;
-        data->type = RE::HUD_MESSAGE_TYPE::kNotification;
-        data->text = text;
-        queue->AddMessage(RE::InterfaceStrings::GetSingleton()->hudMenu, RE::UI_MESSAGE_TYPE::kUpdate, data);
-    }
-}
+#include "ThreadStarter/ThreadStartParams.h"
 
-namespace HotSwap::ActorManagement {
+#include "Threading/Thread/NodeHandler.h"
 
-    // ---- Validation ----
+#include <shared_mutex>
 
-    bool canAddActor(uint32_t threadID, RE::Actor* actor, API* api) {
-        if (!actor) {
-            SKSE::log::warn("canAddActor: null actor");
-            return false;
-        }
-        uint32_t formID = actor->GetFormID();
-        SKSE::log::trace("canAddActor: threadID={} actor={:X}", threadID, formID);
+#include "AutoModeStage.h"
+#include "ThreadActor.h"
 
-        // Already in THIS thread?
-        if (api->GetActorPosition(threadID, formID) != -1) {
-            SKSE::log::debug("canAddActor: actor {:X} already in thread {}", formID, threadID);
-            return false;
-        }
+#include "Alignment/ActorAlignment.h"
+#include "Alignment/ThreadKey.h"
+#include "GameAPI/GameActor.h"
+#include "Graph/Node.h"
+#include "PluginInterface/Threading/Thread.h"
+#include "Serial/OldThread.h"
+#include "Threading/Metadata.h"
+#include "Util/VectorUtil.h"
 
-        // Locked in another thread?
-        if (api->IsActorInAnyThread(formID)) {
-            SKSE::log::debug("canAddActor: actor {:X} is locked in another thread", formID, threadID);
-            return false;
-        }
+namespace Threading {
+    using ThreadId = int64_t;
+    class Thread : public OStim::Thread, public RE::BSTEventSink<RE::BSAnimationGraphEvent>{
+    public:
+        ThreadId m_threadId;
 
-        // Would a compatible scene exist for the new actor set?
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+        Threading::Metadata metadata;
 
-        uint32_t ids[kMaxActors + 1];
-        for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
-        ids[count] = formID;
+        Thread(int threadID, ThreadStartParams params);
 
-        bool compatible = api->HasCompatibleNode(threadID, ids, count + 1);
-        SKSE::log::debug("canAddActor: HasCompatibleNode={} for actor {:X} in thread {}", compatible, formID, threadID);
-        return compatible;
-    }
+        ~Thread();
 
-    int32_t addActorToThread(uint32_t threadID, RE::Actor* actor, API* api,
-                             void (*onComplete)(int32_t, void*), void* context) {
-        SKSE::log::debug("addActorToThread: threadID={} actor={:X}", threadID, actor ? actor->GetFormID() : 0);
-        if (!canAddActor(threadID, actor, api)) {
-            SKSE::log::warn("addActorToThread: validation failed for actor {:X} in thread {}",
-                actor ? actor->GetFormID() : 0, threadID);
-            if (onComplete) onComplete(-1, context);
-            return -1;
-        }
+        void initContinue(ThreadStartParams params);
 
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+        inline ThreadFlags getThreadFlags() { return threadFlags; }
+        inline bool isFlagged(ThreadFlag flag) { return (threadFlags & flag) == flag; }
+        inline void flag(ThreadFlag flag) { threadFlags |= flag; }
+        inline void unflag(ThreadFlag flag) { threadFlags &= ~flag; }
 
-        uint32_t ids[kMaxActors + 1];
-        for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
-        ids[count] = actor->GetFormID();
+        inline Graph::Node* getCurrentNodeInternal() { return m_currentNode; }
+        inline int getCurrentSpeed() { return m_currentNodeSpeed; }
 
-        int32_t result = api->MigrateThread(threadID, ids, count + 1, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
-        SKSE::log::debug("addActorToThread: MigrateThread returned {}", result);
-        return result;
-    }
+        std::string getAlignmentKey();
+        Alignment::ActorAlignment getActorAlignment(int index);
+        void updateActorAlignment(int index, Alignment::ActorAlignment alignment);
+        void alignActors();
 
-    int32_t addActorsToThread(uint32_t threadID, const std::vector<RE::Actor*>& actors, API* api,
-                              void (*onComplete)(int32_t, void*), void* context) {
-        SKSE::log::debug("addActorsToThread: threadID={} actorCount={}", threadID, actors.size());
-        if (actors.empty()) {
-            SKSE::log::warn("addActorsToThread: empty actor list");
-            if (onComplete) onComplete(-1, context);
-            return -1;
-        }
+        inline void setStopTimer(int timer) { stopTimer = timer; }
+        void Navigate(std::string sceneId);
 
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+        void ChangeNode(Graph::Node* a_node);
 
-        uint32_t ids[kMaxActors];
-        for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
-        uint32_t newCount = count;
+        void AddActor(RE::Actor* a_actor);
+        void RemoveActor();
 
-        for (auto* actor : actors) {
-            if (!actor || newCount >= kMaxActors) {
-                SKSE::log::warn("addActorsToThread: null actor or limit reached");
-                if (onComplete) onComplete(-1, context);
-                return -1;
-            }
-            if (!canAddActor(threadID, actor, api)) {
-                SKSE::log::warn("addActorsToThread: validation failed for actor {:X}", actor->GetFormID());
-                if (onComplete) onComplete(-1, context);
-                return -1;
-            }
-            ids[newCount++] = actor->GetFormID();
-        }
+        std::vector<Trait::ActorCondition> getActorConditions();
 
-        int32_t result = api->MigrateThread(threadID, ids, newCount, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
-        SKSE::log::debug("addActorsToThread: MigrateThread returned {}", result);
-        return result;
-    }
+        void loop();
 
-    bool canRemoveActor(uint32_t threadID, uint32_t position, API* api) {
-        SKSE::log::trace("canRemoveActor: threadID={} position={}", threadID, position);
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+        inline std::map<int32_t, ThreadActor>& getActors() { return m_actors; }
 
-        if (position >= count || count <= 1) {
-            SKSE::log::debug("canRemoveActor: invalid — position={} count={}", position, count);
-            return false;
-        }
+        ThreadActor* GetActor(GameAPI::GameActor a_actor);
+        ThreadActor* GetActor(int a_position);
+        int getActorPosition(GameAPI::GameActor actor);
+        std::vector<GameAPI::GameActor> getGameActors();
 
-        uint32_t ids[kMaxActors];
-        uint32_t newCount = 0;
-        for (uint32_t i = 0; i < count; i++)
-            if (i != position) ids[newCount++] = buf[i].formID;
+        void SetSpeed(int speed);
+        bool increaseSpeed();
+        bool decreaseSpeed();
+        inline int getSpeed() { return m_currentNodeSpeed; }
+        inline float getRelativeSpeed() { return m_currentNode ? static_cast<float>(m_currentNodeSpeed) / static_cast<float>(m_currentNode->speeds.size()) : 0; }
 
-        bool compatible = api->HasCompatibleNode(threadID, ids, newCount);
-        SKSE::log::debug("canRemoveActor: HasCompatibleNode={} for position {} in thread {}", compatible, position, threadID);
-        return compatible;
-    }
+        float getMaxExcitement();
 
-    int32_t removeActorFromThread(uint32_t threadID, uint32_t position, API* api,
-                                  void (*onComplete)(int32_t, void*), void* context) {
-        SKSE::log::debug("removeActorFromThread: threadID={} position={}", threadID, position);
-        if (!canRemoveActor(threadID, position, api)) {
-            SKSE::log::warn("removeActorFromThread: validation failed for position {} in thread {}", position, threadID);
-            if (onComplete) onComplete(-1, context);
-            return -1;
-        }
+        void callEvent(std::string eventName, int actorIndex, int targetIndex, int performerIndex);
 
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+        void stop();
+        void stopFaded();
+        void close();
 
-        uint32_t ids[kMaxActors];
-        uint32_t newCount = 0;
-        for (uint32_t i = 0; i < count; i++)
-            if (i != position) ids[newCount++] = buf[i].formID;
+        inline GameAPI::GamePosition getCenter() { return center; }
 
-        int32_t result = api->MigrateThread(threadID, ids, newCount, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
-        SKSE::log::debug("removeActorFromThread: MigrateThread returned {}", result);
-        return result;
-    }
+        inline Threading::Threads::NodeHandler* getNodeHandler() { return nodeHandler; }
+    
+        virtual RE::BSEventNotifyControl ProcessEvent(const RE::BSAnimationGraphEvent* a_event, RE::BSTEventSource<RE::BSAnimationGraphEvent>* a_eventSource) override;
 
-    int32_t removeActorsFromThread(uint32_t threadID, const std::vector<uint32_t>& positions, API* api,
-                                   void (*onComplete)(int32_t, void*), void* context) {
-        SKSE::log::debug("removeActorsFromThread: threadID={} positionCount={}", threadID, positions.size());
-        if (positions.empty()) {
-            SKSE::log::warn("removeActorsFromThread: empty position list");
-            if (onComplete) onComplete(-1, context);
-            return -1;
-        }
+        Serialization::OldThread serialize();
 
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+    private:
+        ThreadFlags threadFlags = 0;
 
-        // Validate all positions first
-        for (uint32_t pos : positions) {
-            if (pos >= count) {
-                SKSE::log::warn("removeActorsFromThread: position {} out of range (count={})", pos, count);
-                if (onComplete) onComplete(-1, context);
-                return -1;
-            }
-        }
+        Graph::Node* m_currentNode = nullptr;
+        bool playerThread = false;
+        std::map<int32_t, ThreadActor> m_actors;
 
-        // Build removal set and check result would leave at least 1 actor
-        std::vector<bool> remove(count, false);
-        for (uint32_t pos : positions) remove[pos] = true;
-        uint32_t remaining = count - static_cast<uint32_t>(positions.size());
-        if (remaining < 1) {
-            SKSE::log::warn("removeActorsFromThread: would remove all actors");
-            if (onComplete) onComplete(-1, context);
-            return -1;
-        }
+        std::shared_mutex nodeLock;
 
-        uint32_t ids[kMaxActors];
-        uint32_t newCount = 0;
-        for (uint32_t i = 0; i < count; i++)
-            if (!remove[i]) ids[newCount++] = buf[i].formID;
+        GameAPI::GamePosition center;
 
-        if (!api->HasCompatibleNode(threadID, ids, newCount)) {
-            SKSE::log::warn("removeActorsFromThread: no compatible node for resulting actor set");
-            if (onComplete) onComplete(-1, context);
-            return -1;
-        }
+        int m_currentNodeSpeed = 0;
+        float relativeSpeed = -1;
 
-        int32_t result = api->MigrateThread(threadID, ids, newCount, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
-        SKSE::log::debug("removeActorsFromThread: MigrateThread returned {}", result);
-        return result;
-    }
+        std::string alignmentKey;
 
-    bool canSwapActors(uint32_t threadID, uint32_t posA, uint32_t posB, API* api) {
-        SKSE::log::trace("canSwapActors: threadID={} posA={} posB={}", threadID, posA, posB);
-        if (posA == posB) {
-            SKSE::log::warn("canSwapActors: same position {}", posA);
-            return false;
-        }
+        float freeCamSpeedBefore = 0;
+        float worldFOVbefore = 0;
+        float timeScaleBefore = 0;
 
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
-        if (posA >= count || posB >= count) {
-            SKSE::log::warn("canSwapActors: position out of range — posA={} posB={} count={}", posA, posB, count);
-            return false;
-        }
+        int stopTimer = 0;
+        bool isStopping = false;
 
-        if (api->IsUnrestrictedNavigation()) {
-            SKSE::log::trace("canSwapActors: unrestricted navigation, swap allowed");
-            return true;
-        }
+        Threading::Threads::NodeHandler* nodeHandler = nullptr;
 
-        // HasCompatibleNode sorts actors internally, so passing swapped IDs would just
-        // produce the same sorted order — it can't validate position-specific sex roles.
-        // Check intendedSexOnly explicitly: actors must share the same sex to swap roles.
-        if (api->IsIntendedSexOnly() && buf[posA].isFemale != buf[posB].isFemale) {
-            SKSE::log::debug("canSwapActors: sex restriction prevents swap — posA={} posB={}", posA, posB);
-            return false;
-        }
+        std::vector<Sound::SoundPlayer*> soundPlayers;
 
-        uint32_t ids[kMaxActors];
-        for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
-        std::swap(ids[posA], ids[posB]);
+        void addActorInner(int index, RE::Actor* actor);
+        void addActorSink(RE::Actor* a_actor);
+        void removeActorSink(RE::Actor* a_actor);
 
-        bool compatible = api->HasCompatibleNode(threadID, ids, count);
-        SKSE::log::debug("canSwapActors: HasCompatibleNode={}", compatible);
-        return compatible;
-    }
+        void rebuildAlignmentKey();
+        void alignActor(ThreadActor* threadActor, Alignment::ActorAlignment alignment);
 
-    std::vector<uint32_t> getSwapPartners(uint32_t threadID, RE::Actor* actor, API* api) {
-        SKSE::log::trace("getSwapPartners: threadID={} actor={:X}", threadID, actor ? actor->GetFormID() : 0);
-        if (!actor) return {};
-        int32_t pos = api->GetActorPosition(threadID, actor->GetFormID());
-        if (pos == -1) {
-            SKSE::log::warn("getSwapPartners: actor {:X} not found in thread {}", actor->GetFormID(), threadID);
-            return {};
-        }
+#pragma region autocontrol
+    public:
+        inline bool isInAutoMode() { return autoMode; }
+        void startAutoMode();
+        inline void stopAutoMode() { autoMode = false; }
 
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+        void setAutoModeToMainStage();
 
-        std::vector<uint32_t> partners;
-        for (uint32_t i = 0; i < count; i++) {
-            if (i != static_cast<uint32_t>(pos) && canSwapActors(threadID, static_cast<uint32_t>(pos), i, api))
-                partners.push_back(i);
-        }
-        SKSE::log::debug("getSwapPartners: found {} partner(s) for actor {:X}", partners.size(), actor->GetFormID());
-        return partners;
-    }
+    private:
+        int autoSpeedControlCooldown = 5000;
 
-    int32_t swapActors(uint32_t threadID, uint32_t posA, uint32_t posB, API* api,
-                       void (*onComplete)(int32_t, void*), void* context) {
-        SKSE::log::debug("swapActors: threadID={} posA={} posB={}", threadID, posA, posB);
-        if (!canSwapActors(threadID, posA, posB, api)) {
-            SKSE::log::warn("swapActors: validation failed for posA={} posB={} in thread {}", posA, posB, threadID);
-            if (onComplete) onComplete(-1, context);
-            return -1;
-        }
+        bool autoMode = false;
+        AutoModeStage autoModeStage = AutoModeStage::NONE;
+        int foreplayThreshold = 0;
+        int pulloutThreshold = 0;
+        int autoModeCooldown = 0;
 
-        OstimNG_API::Thread::ActorData buf[kMaxActors];
-        uint32_t count = api->GetActors(threadID, buf, kMaxActors);
+        void evaluateAutoMode();
+        void startAutoModeCooldown();
+        void progressAutoMode();
+        void loopAutoControl();
+        void nodeChangedAutoControl();
+#pragma endregion
 
-        uint32_t ids[kMaxActors];
-        for (uint32_t i = 0; i < count; i++) ids[i] = buf[i].formID;
-        std::swap(ids[posA], ids[posB]);
+#pragma region climax
+    public:
+        inline bool getStallClimax() { return stallClimax; }
+        inline void setStallClimax(bool stallClimax) { this->stallClimax = stallClimax; }
+        bool isAnyActorAwaitingClimax();
 
-        int32_t result = api->MigrateThread(threadID, ids, count, onComplete, context, HotSwap::Settings::GetSingleton()->GetMigrationDelayMs());
-        SKSE::log::debug("swapActors: MigrateThread returned {}", result);
-        return result;
-    }
+    private:
+        bool stallClimax = false;
+#pragma endregion
+
+#pragma region events
+    public:
+        // if you want to register for an event only for the duration of a node register to the NodeHandlers version of the event
+        // NodeHandlers will be cleared on every node change
+        inline void registerLoopListener(std::function<void()> listener) { loopListeners.push_back(listener); }
+        inline void registerPeakListener(std::function<void(actionIndex)> listener) { peakListeners.push_back(listener); }
+        inline void registerNodeChangedListener(std::function<void()> listener) { nodeChangedListeners.push_back(listener); }
+        inline void registerSpeedChangedListener(std::function<void()> listener) { speedChangedListeners.push_back(listener); }
+        inline void registerClimaxListener(std::function<void(ThreadActor*)> listener) { climaxListeners.push_back(listener); }
+        inline void registerThreadEndListener(std::function<void()> listener) { threadEndListeners.push_back(listener); }
+
+        void sendPeak(actionIndex peak);
+
+    private:
+        std::vector<std::function<void()>> loopListeners;
+        std::vector<std::function<void(actionIndex)>> peakListeners;
+        std::vector<std::function<void()>> nodeChangedListeners;
+        std::vector<std::function<void()>> speedChangedListeners;
+        std::vector<std::function<void(ThreadActor*)>> climaxListeners;
+        std::vector<std::function<void()>> threadEndListeners;
+#pragma endregion
+
+#pragma region furniture
+    public:
+        inline GameAPI::GameObject getFurniture() { return furniture; }
+        inline Furniture::FurnitureType* getFurnitureType() { return furnitureType; }
+
+        void changeFurniture(GameAPI::GameObject furniture, Graph::Node* node);
+
+    private:
+        GameAPI::GameObject furniture;
+        Furniture::FurnitureType* furnitureType = nullptr;
+        GameAPI::GameOwnership furnitureOwner = nullptr;
+        float furnitureScaleMult = 1.0f;
+
+        void changeFurnitureInner(GameAPI::GameObject furniture, Graph::Node* node);
+#pragma endregion
+
+#pragma region navigation
+    public:
+        void loopNavigation();
+        bool autoTransition(std::string type);
+        bool autoTransition(int index, std::string type);
+        void warpTo(Graph::Node* node, bool useFades);
+        void queueWarp(Graph::Node* node, int duration);
+        inline void navigateTo(Graph::Node* node) { navigateTo(node, 0); }
+        void navigateTo(Graph::Node* node, int duration);
+        void queueNavigation(Graph::Node* node, int duration);
+        void playSequence(Graph::Sequence* sequence, bool navigateTo, bool useFades);
+        void playSequence(std::vector<Graph::SequenceEntry> nodes, bool navigateTo, bool useFades);
+        bool pullOut();
+        inline bool areNodesQueued() { return !nodeQueue.empty(); }
+        inline bool isInSequence() { return inSequence; }
+
+    private:
+        bool inSequence = false;
+        bool endAfterSequence = false;
+        int nodeQueueCooldown = 0;
+        std::queue<Graph::SequenceEntry> nodeQueue;
+
+        void clearNodeQueue();
+#pragma endregion
+
+#pragma region sound
+    public:
+        bool isAnyActorTalking();
+
+    private:
+        bool playingClimaxSound = false;
+#pragma endregion
 
 
-    // ---- UI flows (CommonLibSSE message boxes) ----
+#pragma region abi
+    public:
+        virtual int32_t getThreadID() override;
 
-    void addActorWithUI(uint32_t threadID, API* api) {
-        SKSE::log::debug("addActorWithUI: threadID={}", threadID);
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (!player) return;
+        virtual bool isPlayerThread() override;
 
-        std::vector<RE::Actor*> candidates;
-        RE::ProcessLists::GetSingleton()->ForEachHighActor([&](RE::Actor* a) {
-            if (a && !a->IsPlayerRef() && a->GetPosition().GetDistance(player->GetPosition()) <= 2000.f)
-                if (canAddActor(threadID, a, api)) candidates.push_back(a);
-            return RE::BSContainer::ForEachResult::kContinue;
-        });
+        virtual uint32_t getActorCount() override;
+        virtual OStim::ThreadActor* getActor(uint32_t position) override;
+        virtual void forEachThreadActor(OStim::ThreadActorVisitor* visitor) override;
 
-        SKSE::log::debug("addActorWithUI: {} candidate(s) found", candidates.size());
-        if (candidates.empty()) {
-            SendNotification("No valid actors nearby to add");
-            return;
-        }
+        virtual OStim::Node* getCurrentNode() override;
+#pragma endregion
+    };
 
-        std::vector<std::string> names;
-        for (auto* a : candidates) names.push_back(a->GetName());
-
-        HotSwap::Utils::ShowMessageBox("Select actor to add", names,
-            [threadID, candidates, api](uint32_t idx) {
-                if (idx >= candidates.size()) return;
-                SKSE::log::debug("addActorWithUI: selected idx={} actor={:X}", idx, candidates[idx]->GetFormID());
-                addActorToThread(threadID, candidates[idx], api, [](int32_t newID, void*) {
-                    SKSE::GetTaskInterface()->AddTask([newID]() {
-                        SKSE::log::debug("addActorWithUI: migration complete, newThreadID={}", newID);
-                        SendNotification(newID >= 0 ? "Actor added" : "Failed to add actor");
-                    });
-                });
-            });
-    }
-
-    void removeActorWithUI(uint32_t threadID, API* api) {
-        SKSE::log::debug("removeActorWithUI: threadID={}", threadID);
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
-
-        std::vector<std::string> names;
-        std::vector<uint32_t> positions;
-        for (uint32_t i = 0; i < count; i++) {
-            if (canRemoveActor(threadID, i, api)) {
-                auto* actor = RE::TESForm::LookupByID<RE::Actor>(buf[i].formID);
-                std::string name = actor ? actor->GetName() : "Unknown";
-                names.push_back(name);
-                positions.push_back(i);
-            }
-        }
-
-        SKSE::log::debug("removeActorWithUI: {} removable actor(s)", positions.size());
-        if (positions.empty()) {
-            SendNotification("No actors can be removed");
-            return;
-        }
-
-        HotSwap::Utils::ShowMessageBox("Select actor to remove", names,
-            [threadID, positions, api](uint32_t idx) {
-                if (idx >= positions.size()) return;
-                SKSE::log::debug("removeActorWithUI: selected idx={} position={}", idx, positions[idx]);
-                removeActorFromThread(threadID, positions[idx], api, [](int32_t newID, void*) {
-                    SKSE::GetTaskInterface()->AddTask([newID]() {
-                        SKSE::log::debug("removeActorWithUI: migration complete, newThreadID={}", newID);
-                        SendNotification(newID >= 0 ? "Actor removed" : "Failed to remove actor");
-                    });
-                });
-            });
-    }
-
-    void swapActorsWithUI(uint32_t threadID, API* api) {
-        OstimNG_API::Thread::ActorData buf[32];
-        uint32_t count = api->GetActors(threadID, buf, 32);
-        SKSE::log::debug("swapActorsWithUI: threadID={} actorCount={}", threadID, count);
-        if (count < 2) { SendNotification("Not enough actors to swap"); return; }
-
-        std::vector<std::string> names;
-        for (uint32_t i = 0; i < count; i++) {
-            auto* actor = RE::TESForm::LookupByID<RE::Actor>(buf[i].formID);
-            names.push_back(actor ? actor->GetName() : "Unknown");
-        }
-
-        // First selection: pick actor A
-        HotSwap::Utils::ShowMessageBox("Swap: select first actor", names,
-            [threadID, buf, count, api](uint32_t posA) {
-                if (posA >= count) return;
-                SKSE::log::debug("swapActorsWithUI: selected posA={}", posA);
-
-                std::vector<std::string> partnerNames;
-                std::vector<uint32_t> partnerPositions;
-                for (uint32_t i = 0; i < count; i++) {
-                    if (i != posA && canSwapActors(threadID, posA, i, api)) {
-                        auto* a = RE::TESForm::LookupByID<RE::Actor>(buf[i].formID);
-                        partnerNames.push_back(a ? a->GetName() : "Unknown");
-                        partnerPositions.push_back(i);
-                    }
-                }
-
-                SKSE::log::debug("swapActorsWithUI: {} valid partner(s) for posA={}", partnerPositions.size(), posA);
-                if (partnerPositions.empty()) {
-                    SendNotification("No valid swap partners");
-                    return;
-                }
-
-                HotSwap::Utils::ShowMessageBox("Swap: select second actor", partnerNames,
-                    [threadID, posA, partnerPositions, api](uint32_t idx) {
-                        if (idx >= partnerPositions.size()) return;
-                        SKSE::log::debug("swapActorsWithUI: selected posB={}", partnerPositions[idx]);
-                        swapActors(threadID, posA, partnerPositions[idx], api, [](int32_t newID, void*) {
-                            SKSE::GetTaskInterface()->AddTask([newID]() {
-                                SKSE::log::debug("swapActorsWithUI: migration complete, newThreadID={}", newID);
-                                SendNotification(newID >= 0 ? "Actors swapped" : "Failed to swap actors");
-                            });
-                        });
-                    });
-            });
-    }
-}
+}  // namespace OStim
